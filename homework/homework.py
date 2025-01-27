@@ -96,3 +96,206 @@
 # {'type': 'cm_matrix', 'dataset': 'train', 'true_0': {"predicted_0": 15562, "predicte_1": 666}, 'true_1': {"predicted_0": 3333, "predicted_1": 1444}}
 # {'type': 'cm_matrix', 'dataset': 'test', 'true_0': {"predicted_0": 15562, "predicte_1": 650}, 'true_1': {"predicted_0": 2490, "predicted_1": 1420}}
 #
+#_________________________________________________Step 0 Librerias______________________________________________________
+import pandas as pd
+import numpy as np
+import os
+import pickle
+import gzip
+import json
+from sklearn.pipeline import Pipeline
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import StandardScaler, OneHotEncoder
+from sklearn.feature_selection import SelectKBest, f_classif
+from sklearn.decomposition import PCA
+from sklearn.neural_network import MLPClassifier
+from sklearn.model_selection import GridSearchCV
+from sklearn.model_selection import StratifiedKFold
+from sklearn.metrics import precision_score, balanced_accuracy_score, recall_score, f1_score
+from sklearn.metrics import confusion_matrix
+
+#_________________________________________________Step 1 Limpieza_______________________________________________________
+
+# Construcción de rutas compatibles
+train_path = os.path.join("files", "input", "train_data.csv.zip")
+test_path = os.path.join("files", "input", "test_data.csv.zip")
+
+# Lectura de archivos
+data_train = pd.read_csv(train_path, index_col=False, compression="zip")
+data_test = pd.read_csv(test_path, index_col=False, compression="zip")
+
+
+# Función para renombrar columnas
+def rename_columns(data, old_name, new_name):
+    data.rename(columns={old_name: new_name}, inplace=True)
+
+# Función para eliminar columnas
+def drop_columns(data, columns_to_drop):
+    data.drop(columns=columns_to_drop, inplace=True)
+
+# Función para limpiar valores en una columna
+def clean_column(data, column_name, condition, replacement):
+    data[column_name] = data[column_name].apply(lambda x: replacement if condition(x) else x)
+
+# Renombrar columnas en ambos datasets
+rename_columns(data_train, "default payment next month", "default")
+rename_columns(data_test, "default payment next month", "default")
+
+# Eliminar la columna 'ID' en ambos datasets
+drop_columns(data_train, ['ID'])
+drop_columns(data_test, ['ID'])
+
+# Limpiar las columnas 'EDUCATION' y 'MARRIAGE' en ambos datasets
+for column in ['EDUCATION', 'MARRIAGE']:
+    clean_column(data_train, column, lambda x: x <= 0, np.nan)
+    clean_column(data_test, column, lambda x: x <= 0, np.nan)
+
+# Asegurar que los valores en 'EDUCATION' no sean mayores que 4
+clean_column(data_train, 'EDUCATION', lambda x: x > 4, 4)
+clean_column(data_test, 'EDUCATION', lambda x: x > 4, 4)
+
+# Eliminar filas con valores nulos en ambos datasets
+data_train.dropna(inplace=True)
+data_test.dropna(inplace=True)
+#________________________________________Step 2 División datasets_______________________________________________________
+x_train = data_train.drop(columns=['default'])
+y_train = data_train["default"]
+x_test = data_test.drop(columns=['default'])
+y_test = data_test["default"]
+#________________________________________Step 3 Creación Pipeline_______________________________________________________
+
+# Función para definir las características categóricas y numéricas
+def define_features(X_train, categorical_cols):
+    return [col for col in X_train.columns if col not in categorical_cols]
+
+# Función para crear el preprocesador
+def create_preprocessor(categorical_cols, numerical_cols):
+    return ColumnTransformer(
+        transformers=[
+            ('cat', OneHotEncoder(), categorical_cols),
+            ('scaler', StandardScaler(), numerical_cols)
+        ]
+    )
+
+# Función para crear el pipeline
+def create_pipeline(preprocessor, k_best_features=None, n_components_pca=None):
+    steps = [
+        ("preprocessor", preprocessor),
+        ('feature_selection', SelectKBest(score_func=f_classif, k=k_best_features)),
+        ('pca', PCA(n_components=n_components_pca)),
+        ('classifier', MLPClassifier(max_iter=15000, random_state=21))
+    ]
+    return Pipeline(steps)
+
+# Definir las características categóricas y numéricas
+categorical_features = ["SEX", "EDUCATION", "MARRIAGE"]
+numerical_features = define_features(x_train, categorical_features)
+
+# Crear el preprocesador
+preprocessor = create_preprocessor(categorical_features, numerical_features)
+
+# Crear el pipeline
+pipeline = create_pipeline(preprocessor, k_best_features=10, n_components_pca=20)  # Ajusta 'k' y 'n_components' según tus necesidades
+
+#________________________________________Step 4 Optimización parametros ________________________________________________
+
+# Función para definir la cuadrícula de hiperparámetros
+def define_param_grid():
+    return {
+        "pca__n_components": [None],  # Número de componentes para PCA
+        "feature_selection__k": [20],  # Número de características a seleccionar
+        "classifier__hidden_layer_sizes": [(50, 30, 40, 60)],  # Tamaño de las capas ocultas
+        "classifier__alpha": [0.26],  # Parámetro de regularización
+        "classifier__learning_rate_init": [0.001],  # Tasa de aprendizaje inicial
+    }
+
+# Función para crear el modelo de búsqueda de hiperparámetros
+def create_grid_search_model(pipeline, param_grid, cv=10, scoring="balanced_accuracy", n_jobs=-1, refit=True, verbose=2):
+    return GridSearchCV(
+        estimator=pipeline,
+        param_grid=param_grid,
+        cv=cv,
+        scoring=scoring,
+        n_jobs=n_jobs,
+        refit=refit,
+        verbose=verbose
+    )
+
+# Definir la cuadrícula de hiperparámetros
+param_grid = define_param_grid()
+
+# Crear el modelo de búsqueda de hiperparámetros
+modelo = create_grid_search_model(pipeline, param_grid)
+
+# Entrenar el modelo
+modelo.fit(x_train, y_train)
+#____________________________________________Step 5 Guardar modelo _____________________________________________________
+
+dir_path = '../files/models'
+
+if not os.path.exists(dir_path):
+    os.makedirs(dir_path)
+    with gzip.open('../files/models/model.pkl.gz', 'wb') as f:
+        pickle.dump(modelo, f)
+else:
+    with gzip.open('../files/models/model.pkl.gz', 'wb') as f:
+        pickle.dump(modelo, f)
+#_______________________________________________Step 6 Matrices ________________________________________________________
+# Función para calcular métricas
+def calculate_metrics(y_true, y_pred, dataset_name):
+    return {
+        "type": "metrics",
+        "dataset": dataset_name,
+        "precision": precision_score(y_true, y_pred),
+        "balanced_accuracy": balanced_accuracy_score(y_true, y_pred),
+        "recall": recall_score(y_true, y_pred),
+        "f1_score": f1_score(y_true, y_pred)
+    }
+
+# Función para guardar métricas en un archivo JSON
+def save_metrics_to_file(metrics_list, output_path):
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    with open(output_path, 'w', encoding='utf-8') as f:
+        for metrics in metrics_list:
+            json.dump(metrics, f, ensure_ascii=False)
+            f.write('\n')
+
+# Obtener predicciones
+y_train_pred = modelo.predict(x_train)
+y_test_pred = modelo.predict(x_test)
+
+# Calcular métricas para train y test
+train_metrics = calculate_metrics(y_train, y_train_pred, "train")
+test_metrics = calculate_metrics(y_test, y_test_pred, "test")
+
+# Guardar métricas en un archivo JSON
+output_path = '../files/output/metrics.json'
+save_metrics_to_file([train_metrics, test_metrics], output_path)
+#___________________________________Step 7 Calculo de Confusión ________________________________________________________
+# Función para crear un diccionario de matriz de confusión
+def create_confusion_matrix_dict(cm, dataset_name):
+    return {
+        'type': 'cm_matrix',
+        'dataset': dataset_name,
+        'true_0': {'predicted_0': int(cm[0, 0]), 'predicted_1': int(cm[0, 1])},
+        'true_1': {'predicted_0': int(cm[1, 0]), 'predicted_1': int(cm[1, 1])}
+    }
+
+# Función para guardar diccionarios en un archivo JSON
+def append_to_json_file(data_list, output_path):
+    with open(output_path, 'a', encoding='utf-8') as f:
+        for data in data_list:
+            json.dump(data, f, ensure_ascii=False)
+            f.write('\n')
+
+# Calcular matrices de confusión
+train_cm = confusion_matrix(y_train, y_train_pred)
+test_cm = confusion_matrix(y_test, y_test_pred)
+
+# Crear diccionarios de matrices de confusión
+train_cm_dict = create_confusion_matrix_dict(train_cm, 'train')
+test_cm_dict = create_confusion_matrix_dict(test_cm, 'test')
+
+# Guardar diccionarios en el archivo JSON
+output_path = '../files/output/metrics.json'
+append_to_json_file([train_cm_dict, test_cm_dict], output_path)
